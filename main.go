@@ -4,6 +4,7 @@ import (
 	"github.com/urfave/cli/v2"
 	"log"
 	"os"
+	"runtime/debug"
 )
 
 var (
@@ -55,6 +56,11 @@ func main() {
 				Action:    doView,
 			},
 		},
+	}
+
+	buildInfo, _ := debug.ReadBuildInfo()
+	if buildInfo != nil {
+		app.Version = buildInfo.Main.Version
 	}
 
 	err := app.Run(os.Args)
