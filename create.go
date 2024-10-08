@@ -8,7 +8,9 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,11 +22,16 @@ func doCreate(cCtx *cli.Context) error {
 	outputFile := cCtx.Args().Get(0)
 	inputDir := cCtx.Args().Get(1)
 
+	headerCustomizer, err := newHeaderCustomizer(cCtx)
+	if err != nil {
+		return err
+	}
+
 	outputWriter, err := os.Create(outputFile)
 	if err != nil {
 		return err
 	}
-	outputTarGzWriter, err := NewTarGzWriter(outputWriter)
+	outputTarGzWriter, err := NewTarGzWriter(outputWriter, headerCustomizer)
 	if err != nil {
 		return err
 	}
@@ -36,7 +43,7 @@ func doCreate(cCtx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	controlTarGzWriter, err := NewTarGzWriter(controlTarGzFile)
+	controlTarGzWriter, err := NewTarGzWriter(controlTarGzFile, headerCustomizer)
 	if err != nil {
 		return err
 	}
@@ -45,7 +52,7 @@ func doCreate(cCtx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	dataTarGzWriter, err := NewTarGzWriter(dataTarGzFile)
+	dataTarGzWriter, err := NewTarGzWriter(dataTarGzFile, headerCustomizer)
 	if err != nil {
 		return err
 	}
@@ -113,22 +120,106 @@ func doCreate(cCtx *cli.Context) error {
 	return nil
 }
 
-type TarGzWriter struct {
-	w         io.WriteCloser
-	gzWriter  *gzip.Writer
-	tarWriter *tar.Writer
+func newHeaderCustomizer(cCtx *cli.Context) (func(tarHeader *tar.Header) error, error) {
+	var hasUid bool
+	var hasUname bool
+	var hasGid bool
+	var hasGname bool
+	var uid int
+	var uname string
+	var gid int
+	var gname string
+
+	if cCtx.IsSet(uidFlag.Name) {
+		hasUid = true
+		uid = uidFlag.Get(cCtx)
+	}
+	if cCtx.IsSet(unameFlag.Name) {
+		hasUname = true
+		uname = unameFlag.Get(cCtx)
+	}
+	if cCtx.IsSet(gidFlag.Name) {
+		hasGid = true
+		gid = gidFlag.Get(cCtx)
+	}
+	if cCtx.IsSet(gnameFlag.Name) {
+		hasGname = true
+		gname = gnameFlag.Get(cCtx)
+	}
+
+	if !hasUid && hasUname {
+		osUser, err := user.Lookup(uname)
+		if err != nil {
+			return nil, err
+		}
+		uid, err = strconv.Atoi(osUser.Uid)
+		if err != nil {
+			return nil, err
+		}
+		hasUid = true
+	} else if hasUid && !hasUname {
+		osUser, err := user.LookupId(strconv.FormatInt(int64(uid), 10))
+		if err != nil {
+			return nil, err
+		}
+		uname = osUser.Username
+		hasUname = true
+	}
+
+	if !hasGid && hasGname {
+		osGroup, err := user.LookupGroup(gname)
+		if err != nil {
+			return nil, err
+		}
+		gid, err = strconv.Atoi(osGroup.Gid)
+		if err != nil {
+			return nil, err
+		}
+		hasGid = true
+	} else if hasGid && !hasGname {
+		osGroup, err := user.LookupGroupId(strconv.FormatInt(int64(gid), 10))
+		if err != nil {
+			return nil, err
+		}
+		gname = osGroup.Name
+		hasGname = true
+	}
+
+	return func(tarHeader *tar.Header) error {
+		if hasUid {
+			tarHeader.Uid = uid
+		}
+		if hasUname {
+			tarHeader.Uname = uname
+		}
+		if hasGid {
+			tarHeader.Gid = gid
+		}
+		if hasGname {
+			tarHeader.Gname = gname
+		}
+		return nil
+	}, nil
 }
 
-func NewTarGzWriter(w io.WriteCloser) (*TarGzWriter, error) {
+type TarGzWriter struct {
+	w                io.WriteCloser
+	headerCustomizer func(tarHeader *tar.Header) error
+	gzWriter         *gzip.Writer
+	tarWriter        *tar.Writer
+}
+
+func NewTarGzWriter(w io.WriteCloser, headerCustomizer func(tarHeader *tar.Header) error) (*TarGzWriter, error) {
 	gzWriter, err := gzip.NewWriterLevel(w, gzip.BestCompression)
 	if err != nil {
 		return nil, err
 	}
 	tarWriter := tar.NewWriter(gzWriter)
 	return &TarGzWriter{
-		w:         w,
-		gzWriter:  gzWriter,
-		tarWriter: tarWriter,
+		w:                w,
+		headerCustomizer: headerCustomizer,
+		gzWriter:         gzWriter,
+		tarWriter:        tarWriter,
 	}, nil
 
 }
@@ -139,15 +230,35 @@ func (t *TarGzWriter) WriteBytesAsFile(name string, data []byte) error {
 		Size:       int64(len(data)),
 		Typeflag:   tar.TypeReg,
 		Mode:       0644,
-		Uid:        0,
-		Gid:        0,
-		Uname:      "root",
-		Gname:      "root",
 		AccessTime: time.Now(),
 		ChangeTime: time.Now(),
 		ModTime:    time.Now(),
 	}
-	err := t.tarWriter.WriteHeader(header)
+	osUser, err := user.Current()
+	if err != nil {
+		return err
+	}
+	osGroup, err := user.LookupGroupId(osUser.Gid)
+	if err != nil {
+		return err
+	}
+	uid, err := strconv.Atoi(osUser.Uid)
+	if err != nil {
+		return err
+	}
+	gid, err := strconv.Atoi(osGroup.Gid)
+	if err != nil {
+		return err
+	}
+	header.Uid = uid
+	header.Gid = gid
+	header.Uname = osUser.Username
+	header.Gname = osGroup.Name
+	err = t.headerCustomizer(header)
+	if err != nil {
+		return err
+	}
+	err = t.tarWriter.WriteHeader(header)
 	if err != nil {
 		return err
 	}
@@ -168,6 +279,10 @@ func (t *TarGzWriter) WriteFile(name string, path string) error {
 		return err
 	}
 	header.Name = name
+	err = t.headerCustomizer(header)
+	if err != nil {
+		return err
+	}
 	err = t.tarWriter.WriteHeader(header)
 	if err != nil {
 		return err
