@@ -23,6 +23,12 @@ func main() {
 				ArgsUsage: "(ipk file) (output directory)",
 				Action:    doExtract,
 			},
+			{
+				Name:      "view",
+				Usage:     "view",
+				ArgsUsage: "(ipk file)",
+				Action:    doView,
+			},
 		},
 	}
 
