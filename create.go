@@ -69,7 +69,18 @@ func doCreate(cCtx *cli.Context) error {
 		}
 		newPath := "./" + relativePath
 		if dirEntry.IsDir() {
-			if (newPath == ".") || (newPath == "./CONTROL") {
+			if newPath == "./." {
+				err = dataTarGzWriter.WriteFile("./", path)
+				if err != nil {
+					return err
+				}
+				return nil
+			}
+			if newPath == "./CONTROL" {
+				err = controlTarGzWriter.WriteFile("./", path)
+				if err != nil {
+					return err
+				}
 				return nil
 			}
 		}
